@@ -1,109 +1,127 @@
-import machine
+import paho.mqtt.client as mqtt
+import ujson as json
 import time
-import ustruct
-import usocket as socket
-import ujson
-from umqtt.simple import MQTTClient
+import machine
+import network
+import ubinascii
+import struct
 import sqlite3
+from machine import SPI, Pin
 
-# Initialize the SPI interface and connect to the SIM800L module
-spi = machine.SPI(1, baudrate=1000000, sck=machine.Pin(5), mosi=machine.Pin(6), miso=machine.Pin(7))
-sim800l = machine.UART(2, baudrate=9600, tx=machine.Pin(8), rx=machine.Pin(9))
-sim800l.init(9600, bits=8, parity=None, stop=1)
+class Ra02:
+    def __init__(self, spi, nss, reset, dio0):
+        self.spi = spi
+        self.nss = nss
+        self.reset = reset
+        self.dio0 = dio0
 
-datetime_data = {}
+        self.spi.init(baudrate=1000000, polarity=0, phase=0)
 
-# Define a function to send AT commands to the SIM800L module
-def send_at_command(command):
-    sim800l.write(command + b'\r\n')
-    time.sleep(1)
-    response = sim800l.readline()
-    return response.decode('utf-8').rstrip()
+        self.nss.init(self.nss.OUT, value=1)
+        self.reset.init(self.reset.OUT, value=1)
+        self.dio0.init(self.dio0.IN)
 
-# Set up the SIM800L module for MQTT communication
-send_at_command(b'AT+SAPBR=3,1,"CONTYPE","GPRS"')
-send_at_command(b'AT+SAPBR=3,1,"APN","Megafon"')
-send_at_command(b'AT+SAPBR=1,1')
+        self.reset.value(0)
+        time.sleep(0.1)
+        self.reset.value(1)
+        time.sleep(0.1)
 
-# Get the IP address assigned to the SIM800L
-response = send_at_command(b'AT+SAPBR=2,1')
-ip_address = response.split(':')[1].split(',')[0]
+        self.set_mode(0)
 
-# Set up the MQTT client
-mqtt_client = MQTTClient("client_id", "91.230.107.224", user="amir.mukumov", password="123123")
+    def set_mode(self, mode):
+        self.nss.value(0)
+        self.spi.write(bytes([0x40 | mode]))
+        self.nss.value(1)
 
-# Define a function to send MQTT data
-def send_mqtt_data(topic, payload):
-    if mqtt_client.isconnected():
-        mqtt_client.publish(topic, payload)
-    else:
-        conn = sqlite3.connect("data.db")
-        cursor = conn.cursor()
-        cursor.execute("CREATE TABLE IF NOT EXISTS data (topic TEXT, payload TEXT)")
-        cursor.execute("INSERT INTO data (topic, payload) VALUES (?, ?)", (topic, payload))
-        conn.commit()
-        conn.close()
+    def receive(self):
+        self.set_mode(3)
+        
+        while not self.dio0.value():
+            pass
 
-# Parse the incoming LoRaWAN data and send it as MQTT data
-def handle_lorawan_data(data_string):
-    # Parse the incoming LoRaWAN data
-    sensor_data = ujson.loads(data_string)
+        self.nss.value(0)
+        data = self.spi.read(8)
+        self.nss.value(1)
 
-    # Get the current timestamp
-    timestamp = time.time()
+        self.set_mode(0)
 
-    # Send each sensor reading as a separate MQTT topic, with the timestamp included
-    for sensor_name, sensor_value in sensor_data.items():
-        topic = "remote_device/" + sensor_name
-        payload = str(sensor_value) + "|" + str(timestamp)
-        send_mqtt_data(topic, payload)
+        return data
 
-# Send GPS and datetime data as MQTT data (assuming you have a GPS module connected to the RV1103 Pi)
-def handle_gps_data(gps_data):
-    send_mqtt_data("gps/latitude", gps_data["latitude"])
-    send_mqtt_data("gps/longitude", gps_data["longitude"])
-    send_mqtt_data("gps/altitude", gps_data["altitude"])
+class Sim800l:
+    def __init__(self, spi, reset, power):
+        self.spi = spi
+        self.reset = reset
+        self.power = power
+        
+        self.spi.init(baudrate=9600, polarity=0, phase=0)
 
-    # Extract the datetime data from the GPS data
-    datetime_data = {
-        "year": gps_data["year"],
-        "month": gps_data["month"],
-        "day": gps_data["day"],
-        "hour": gps_data["hour"],
-        "minute": gps_data["minute"],
-        "second": gps_data["second"]
-    }
+        self.reset.init(self.reset.OUT, value=1)
+        self.power.init(self.power.OUT, value=1)
 
-    # Send datetime data as a single MQTT topic, with the data formatted as a string
-    topic = "datetime"
-    payload = "{year}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}:{second:02d}".format(**datetime_data)
-    send_mqtt_data(topic, payload)
+        self.power.value(0)
+        time.sleep(0.1)
+        self.power.value(1)
+        time.sleep(3)
 
-# Send battery percentage as MQTT data
-def handle_battery_data(battery_percentage):
-    topic = "gateway/battery_percentage"
-    payload = str(battery_percentage)
-    send_mqtt_data(topic, payload)
+        self.reset.value(0)
+        time.sleep(0.1)
+        self.reset.value(1)
+        time.sleep(3)
 
-# Connect to the MQTT server
-mqtt_client.connect()
+    def get_gps_data(self):
+        self.spi.write(bytes('AT+CGPSPWR=1\r\n', 'utf-8'))
+        time.sleep(1)
+        self.spi.write(bytes('AT+CGPSINF=0\r\n', 'utf-8'))
+        time.sleep(1)
+        response = self.spi.read(100)
+        response_str = response.decode('utf-8').strip().split(',')
+        latitude = float(response_str[3]) / 100000
+        longitude = float(response_str[5]) / 100000
+        altitude = float(response_str[7])
+        return (latitude, longitude, altitude)
+    
+lora = Ra02(spi=SPI(1), nss=Pin(10), reset=Pin(9), dio0=Pin(8))
+gps = Sim800l(spi=SPI(2), reset=Pin(16), power=Pin(15))
+adc = machine.ADC(28)
+conn = sqlite3.connect('data.db')
+c = conn.cursor()
+c.execute('''CREATE TABLE IF NOT EXISTS data
+             (timestamp TEXT, t REAL, h REAL, t2 REAL, n REAL, p REAL, k REAL, ph REAL)''')
+conn.commit()
+mqtt_client = mqtt.Client()
+mqtt_client.connect('mqtt_broker_address')
 
-# Check the LTE connection status every 10 seconds
+
+def handle_lora_data(data):
+    t, h, t2, n, p, k, ph = struct.unpack('>ffffff', data)
+    data_json = {'t': t, 'h': h, 't2': t2, 'n': n, 'p': p, 'k': k, 'ph': ph}
+    for key, value in data_json.items():
+        topic = 'lora_id/' + key
+        mqtt_client.publish(topic, str(value))
+
+    
+    c.execute('INSERT INTO data VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (time.time(), t, h, t2, n, p, k, ph))
+    conn.commit()
+
+
+def handle_gps_data():
+    gps_data = gps.get_gps_data()
+    gps_data_json = {'latitude': gps_data[0], 'longitude': gps_data[1], 'altitude': gps_data[2]}
+    mqtt_client.publish('lora_id/gps', json.dumps(gps_data_json))
+
+
+def handle_battery_percentage():
+    battery_percentage = adc.read() / 4095 * 100
+    mqtt_client.publish('lora_id/battery', str(battery_percentage))
+
+
 while True:
-    # Check if the LTE connection is active
-    if send_at_command(b"AT+CSQ")).split(",")[0] != "0":
-        # Send any data in the SQLite database to the MQTT server
-        conn = sqlite3.connect("data.db")
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM data")
-        rows = cursor.fetchall()
-        for row in rows:
-            topic, payload = row
-            mqtt_client.publish(topic, payload)
-        cursor.execute("DELETE FROM data")
-        conn.commit()
-        conn.close()
+    if network.WLAN().isconnected():
+        data = lora.receive()
+        if data is not None:
+            handle_lora_data(data)
+        handle_gps_data()
+        handle_battery_percentage()
     else:
-        # LTE connection is not active, do nothing
-        pass
-    time.sleep(10)
+        c.execute('INSERT INTO data VALUES (?, ?, ?, ?, ?, ?, ?, ?)', (time.time(), None, None, None, None, None, None, None))
+        conn.commit()

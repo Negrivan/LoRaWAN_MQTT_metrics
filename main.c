@@ -49,7 +49,7 @@ int main() {
     dht_init();
     ds18b20_init();
     uart_init();
-    
+
     os_init();
 
     xSensorQueue = xQueueCreate(10, sizeof(float));
@@ -61,23 +61,6 @@ int main() {
 
     // This will never be reached
     return 0;
-}
-
-
-void mqtt_init() {
-    // Create the MQTT client
-    MQTTClient_create(&client, broker, port, NULL);
-
-    // Set the MQTT client options
-    MQTTClient_connectOptions opts = MQTTClient_connectOptions_initializer;
-    opts.keepAliveInterval = 60;
-    opts.cleansession = 1;
-
-    // Connect to the MQTT broker
-    int rc = MQTTClient_connect(client, &opts);
-    if (rc != MQTTCLIENT_SUCCESS) {
-
-    }
 }
 
 void vSensorTask(void *pvParameters) {
