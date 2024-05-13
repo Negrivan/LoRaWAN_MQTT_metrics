@@ -1,0 +1,42 @@
+CREATE TABLE Severity (
+severity_id INTEGER PRIMARY KEY,
+name TEXT
+);
+
+CREATE TABLE Event_Types (
+event_type_id INTEGER PRIMARY KEY,
+name TEXT
+);
+
+-- Creating table for Events
+CREATE TABLE Events (
+event_id INTEGER PRIMARY KEY,
+device_id INTEGER,
+severity_id INTEGER,
+event_type_id INTEGER,
+message TEXT,
+timestamp TEXT,
+FOREIGN KEY (device_id) REFERENCES Field_Stations(device_id),
+FOREIGN KEY (severity_id) REFERENCES Severity(severity_id),
+FOREIGN KEY (event_type_id) REFERENCES Event_Types(event_type_id)
+);
+
+CREATE TABLE Field_Stations (
+device_id INTEGER PRIMARY KEY,
+code_name TEXT
+);
+
+CREATE TABLE Metric_Types (
+metric_type_id INTEGER PRIMARY KEY,
+name TEXT
+);
+
+CREATE TABLE Metrics (
+metric_id INTEGER PRIMARY KEY,
+metric_type_id INTEGER,
+device_id INTEGER,
+value REAL,
+timestamp TEXT,
+FOREIGN KEY (metric_type_id) REFERENCES Metric_Types(metric_type_id),
+FOREIGN KEY (device_id) REFERENCES Field_Stations(device_id)
+);

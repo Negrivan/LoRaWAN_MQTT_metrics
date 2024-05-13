@@ -12,7 +12,7 @@
 #include "DHT.h"
 #include "onewire.h"
 #include <DS18B20.h>
-
+#include "uart.h"
 
 #define RA02_SPI_PORT spi0
 #define RA02_SPI_SCK 3  // SCK pin
@@ -36,6 +36,7 @@ void prepare_soil_moisture_data(char* buffer, size_t buffer_len);
 void send_soil_moisture_data();
 void read_ph_data(float* ph);
 void send_ph_data();
+void read_npk_data(float* npk);
 
 QueueHandle_t xSensorQueue;
 QueueHandle_t xLoRaWANQueue;
@@ -44,19 +45,18 @@ void vSensorTask(void *pvParameters);
 void vLoRaWANTask(void *pvParameters);
 
 int main() {
-    // Initialize the ADC
-    adc_init();
-
-    // Initialize the LoRaWAN stack
+    ADC_Init();
+    dht_init();
+    ds18b20_init();
+    uart_init();
+    
     os_init();
 
     xSensorQueue = xQueueCreate(10, sizeof(float));
     xLoRaWANQueue = xQueueCreate(10, sizeof(char) * 64);
-    // Create the tasks
     xTaskCreate(vSensorTask, "Sensor", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, NULL);
     xTaskCreate(vLoRaWANTask, "LoRaWAN", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, NULL);
 
-    // Start the scheduler
     vTaskStartScheduler();
 
     // This will never be reached
@@ -76,8 +76,7 @@ void mqtt_init() {
     // Connect to the MQTT broker
     int rc = MQTTClient_connect(client, &opts);
     if (rc != MQTTCLIENT_SUCCESS) {
-        // Handle the error
-        // ...
+
     }
 }
 
@@ -85,7 +84,6 @@ void vSensorTask(void *pvParameters) {
     (void) pvParameters;
 
     for (;;) {
-        // Read the sensor data
         float temperature, humidity;
         read_air_data(&temperature, &humidity);
         xQueueSend(xSensorQueue, &temperature, portMAX_DELAY);
@@ -178,12 +176,12 @@ void vRA02Task(void *pvParameters) {
 void ADC_Init() {
     adc_init(void);
     adc_gpio_init(SOIL_MOISTURE_PIN);
-    adc_gpio_init()  // A0 is connected to GPIO 26
+    adc_gpio_init(PH_PIN);
 }
 
 // Read the soil moisture data
 uint16_t read_soil_moisture(float* soil_moisture) {
-    &soil_moisture = ADC_Read(SOIL_MOISTURE_PIN);
+    *soil_moisture = ADC_Read(SOIL_MOISTURE_PIN);
 }
 
 
@@ -214,7 +212,7 @@ void send_soil_moisture_data() {
 
 
 void read_ph_data(float* ph) {
-    &ph = adc_read(PH_PIN);
+    *ph = adc_read(PH_PIN);
 }
 
 void send_ph_data() {
@@ -225,4 +223,11 @@ void send_ph_data() {
     snprintf(buffer, sizeof(buffer), "pH:%.2f", ph);
 
     LMIC_setTxData2(1, (uint8_t*)buffer, strlen(buffer), 0);
+}
+
+
+void read_npk_data(float* npk) {
+    uint8_t buffer[32];
+    uart_read_blocking(UART_ID, buffer, sizeof(buffer));
+    sscanf((const char*)buffer, "N:%f,P:%f,K:%f", &npk_data[0], &npk_data[1], &npk_data[2])
 }
