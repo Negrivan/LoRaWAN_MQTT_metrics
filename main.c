@@ -1,28 +1,41 @@
 #include "rp2040.h"
-#include "hardware/spi.h"
+#include "SPI.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "hardware/adc.h"
 #include "lmic.h"
 #include "MQTTClient.h"
 #include "stdio.h"
+#include "string.h"
+#include "pico/stdlib.h"
+#include "LoRa-RP2040.h"
+#include "DHT.h"
+#include "onewire.h"
+#include <DS18B20.h>
+
 
 #define RA02_SPI_PORT spi0
 #define RA02_SPI_SCK 3  // SCK pin
 #define RA02_SPI_MOSI 4  // MOSI pin
 #define RA02_SPI_MISO 5  // MISO pin
 #define RA02_SPI_CSN 6  // Chip select pin
+#define DHT_PIN 26
+#define SOIL_MOISTURE_PIN 27
+#define PH_PIN 28
 
 
-void vSoilMoistureTask(void *pvParameters);
 void vLoRaWANTask(void *pvParameters);
+void vSensorTask(void *pvParameters);
+
 void spi_init();
 void spi_send_command(uint8_t command, uint8_t* data, size_t data_len);
 void spi_receive_response(uint8_t* buffer, size_t buffer_len)
 void adc_init();
-uint16_t read_soil_moisture();
+uint16_t read_soil_moisture(float* soil_moisture);
 void prepare_soil_moisture_data(char* buffer, size_t buffer_len);
 void send_soil_moisture_data();
+void read_ph_data(float* ph);
+void send_ph_data();
 
 QueueHandle_t xSensorQueue;
 QueueHandle_t xLoRaWANQueue;
@@ -37,8 +50,10 @@ int main() {
     // Initialize the LoRaWAN stack
     os_init();
 
+    xSensorQueue = xQueueCreate(10, sizeof(float));
+    xLoRaWANQueue = xQueueCreate(10, sizeof(char) * 64);
     // Create the tasks
-    xTaskCreate(vSoilMoistureTask, "SoilMoisture", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, NULL);
+    xTaskCreate(vSensorTask, "Sensor", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, NULL);
     xTaskCreate(vLoRaWANTask, "LoRaWAN", configMINIMAL_STACK_SIZE, NULL, tskIDLE_PRIORITY + 1, NULL);
 
     // Start the scheduler
@@ -66,19 +81,31 @@ void mqtt_init() {
     }
 }
 
-void vSoilMoistureTask(void *pvParameters) {
+void vSensorTask(void *pvParameters) {
     (void) pvParameters;
 
     for (;;) {
-        // Read the soil moisture data
-        uint16_t soil_moisture = read_soil_moisture();
+        // Read the sensor data
+        float temperature, humidity;
+        read_air_data(&temperature, &humidity);
+        xQueueSend(xSensorQueue, &temperature, portMAX_DELAY);
+        xQueueSend(xSensorQueue, &humidity, portMAX_DELAY);
 
-        // Prepare the soil moisture data for transmission
-        char buffer[32];
-        prepare_soil_moisture_data(buffer, sizeof(buffer));
+        float ds18b20_temp;
+        read_ds18b20_data(&ds18b20_temp);
+        xQueueSend(xSensorQueue, &ds18b20_temp, portMAX_DELAY);
 
-        // Send the soil moisture data via the LoRaWAN task
-        xQueueSend(xLoRaWANQueue, &buffer, portMAX_DELAY);
+        float npk[3];
+        read_npk_data(npk);
+        xQueueSend(xSensorQueue, npk, portMAX_DELAY);
+
+        float ph;
+        read_ph_data(&ph);
+        xQueueSend(xSensorQueue, &ph, portMAX_DELAY);
+
+        float soil_moisture;
+        read_soil_moisture(&soil_moisture);
+        xQueueSend(xSensorQueue, &soil_moisture, portMAX_DELAY);
 
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
@@ -148,28 +175,54 @@ void vRA02Task(void *pvParameters) {
 
 
 // Initialize the ADC
-void adc_init() {
-    adc_init();
-    adc_gpio_init(26);  // A0 is connected to GPIO 26
+void ADC_Init() {
+    adc_init(void);
+    adc_gpio_init(SOIL_MOISTURE_PIN);
+    adc_gpio_init()  // A0 is connected to GPIO 26
 }
 
 // Read the soil moisture data
-uint16_t read_soil_moisture() {
-    return adc_read();
+uint16_t read_soil_moisture(float* soil_moisture) {
+    &soil_moisture = ADC_Read(SOIL_MOISTURE_PIN);
 }
 
 
 // Prepare the soil moisture data for transmission
-void prepare_soil_moisture_data(char* buffer, size_t buffer_len) {
-    uint16_t soil_moisture = read_soil_moisture();
-    snprintf(buffer, buffer_len, "SM:%u", soil_moisture);
-}
+void prepare_data(char* buffer) {
+    // Read the sensor data from the queue
+    float sensor_data[7];
+    xQueueReceive(xSensorQueue, &sensor_data[0], portMAX_DELAY);
+    xQueueReceive(xSensorQueue, &sensor_data[1], portMAX_DELAY);
+    xQueueReceive(xSensorQueue, &sensor_data[2], portMAX_DELAY);
+    xQueueReceive(xSensorQueue, &sensor_data[3], portMAX_DELAY);
+    xQueueReceive(xSensorQueue, &sensor_data[4], portMAX_DELAY);
+    xQueueReceive(xSensorQueue, &sensor_data[5], portMAX_DELAY);
+    xQueueReceive(xSensorQueue, &sensor_data[6], portMAX_DELAY);
 
+    // Format the data as a string
+    snprintf(buffer, sizeof(buffer), "T:%.1f,H:%.1f,T2:%.1f,N:%.2f,P:%.2f,K:%.2f,pH:%.2f",
+             sensor_data[0], sensor_data[1], sensor_data[2], sensor_data[3], sensor_data[4], sensor_data[5], sensor_data[6]);
+}
 
 
 // Send the soil moisture data via LoRaWAN
 void send_soil_moisture_data() {
+    char buffer[128];
+    prepare_data(buffer, sizeof(buffer));
+    LMIC_setTxData2(1, (uint8_t*)buffer, strlen(buffer), 0);
+}
+
+
+void read_ph_data(float* ph) {
+    &ph = adc_read(PH_PIN);
+}
+
+void send_ph_data() {
+    float ph;
+    read_ph_data(&ph);
+
     char buffer[32];
-    prepare_soil_moisture_data(buffer, sizeof(buffer));
+    snprintf(buffer, sizeof(buffer), "pH:%.2f", ph);
+
     LMIC_setTxData2(1, (uint8_t*)buffer, strlen(buffer), 0);
 }
